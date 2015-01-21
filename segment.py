@@ -30,6 +30,8 @@ class Segment(object):
         # use cell picker for interacting with the image orthogonal views.
         self.boxWidget = []
         self.boundsPlane_presel = []
+        # Create only 1 display
+        self.loadDisplay = Display()
         
     def __call__(self):       
         """ Turn Class into a callable object """
@@ -43,8 +45,56 @@ class Segment(object):
         self.boundsPlane_presel = self.planes.GetPoints().GetBounds()
         
         return
+    
+    def ensureInSegment(self, image, lesionMesh, pathSegment, nameSegment, image_pos_pat, image_ori_pat):    
         
-    def saveSegmentation(self, lesionID_path, lesionMesh):
+        # Proceed to build reference frame for display objects based on DICOM coords   
+        [transformed_image, transform_cube] = self.loadDisplay.dicomTransform(image, image_pos_pat, image_ori_pat)
+        
+        dataToStencil = vtk.vtkPolyDataToImageStencil()
+        dataToStencil.SetInput(lesionMesh)
+        dataToStencil.SetOutputOrigin(transformed_image.GetOrigin())
+        print transformed_image.GetOrigin()
+        dataToStencil.SetOutputSpacing(transformed_image.GetSpacing())
+        print transformed_image.GetSpacing()
+        dataToStencil.SetOutputWholeExtent(transformed_image.GetExtent())
+        dataToStencil.Update()
+        
+        stencil = vtk.vtkImageStencil()
+        stencil.SetInput(transformed_image)
+        stencil.SetStencil(dataToStencil.GetOutput())
+        stencil.ReverseStencilOff()
+        stencil.SetBackgroundValue(0.0)
+        stencil.Update()
+        
+        newSegment = vtk.vtkMetaImageWriter()
+        newSegment.SetFileName(pathSegment+'/'+nameSegment+'.mhd')
+        newSegment.SetInput(stencil.GetOutput())
+        newSegment.Write()
+
+        thresh = vtk.vtkImageThreshold()
+        thresh.SetInput(stencil.GetOutput())
+        thresh.ThresholdByUpper(1)
+        thresh.SetInValue(255)
+        thresh.SetOutValue(0)
+        thresh.Update()
+                  
+        contouriso = vtk.vtkMarchingCubes()
+        contouriso.SetInput(thresh.GetOutput())
+        contouriso.SetValue(0,125)
+        contouriso.ComputeScalarsOn()
+        contouriso.Update()
+        
+        # Recalculate num_voxels and vol_lesion on VOI
+        nvoxels = contouriso.GetOutput().GetNumberOfCells()
+        npoints = contouriso.GetOutput().GetNumberOfPoints()
+        print "Number of points: %d" % npoints 
+        print "Number of cells: %d" % nvoxels 
+        
+        return contouriso.GetOutput()
+        
+        
+    def saveSegmentation(self, lesionID_path, lesionMesh, lesionfilename):
         """
         Saves new segmentation to file
         ARGUMENTS:
@@ -53,7 +103,10 @@ class Segment(object):
         lesionMesh (vtkPolyData)      3D lesion segmentation as a vtkPolyData object       
         """ 
         # need to locate and read Lesion Seg
-        VOIlesion = 'VOIlesion_selected.vtk'
+        if lesionfilename:
+            VOIlesion = lesionfilename    
+        else:
+            VOIlesion = 'VOIlesion_selected.vtk'
             
         lesion3D_writer = vtk.vtkPolyDataWriter()
         lesion3D_writer.SetInput(lesionMesh)
@@ -64,7 +117,7 @@ class Segment(object):
         
         
     def segmentFromSeeds(self, images,  image_pos_pat, image_ori_pat, seeds, iren, xplane, yplane, zplane):
-        """ dicomTransform: transforms an image to a DICOM coordinate frame
+        """ segmentFromSeeds: Extracts VOI from seeds
         
         INPUTS:
         =======        
@@ -76,16 +129,13 @@ class Segment(object):
         transform (vtkTransform)            Transform used
         
         """
-        # Create only 1 display
-        loadDisplay = Display()
-                     
         for postS in range(1,len(images)):
             print "\n Segmenting image post no : %s " % str(postS)
             
-            subimage = loadDisplay.subImage(images, postS)            
+            subimage = self.loadDisplay.subImage(images, postS)            
             
             # Proceed to build reference frame for display objects based on DICOM coords   
-            [transformed_image, transform_cube] = loadDisplay.dicomTransform(subimage, image_pos_pat, image_ori_pat)
+            [transformed_image, transform_cube] = self.loadDisplay.dicomTransform(subimage, image_pos_pat, image_ori_pat)
             
             # Calculate the center of the volume
             transformed_image.UpdateInformation() 
@@ -190,7 +240,7 @@ class Segment(object):
         print "\n Image Scalar Range:"
         print image_scalar_range[0], image_scalar_range[1]
         print "Uper thresholding by"
-        print uThre*0.1
+        print uThre*0.25
         
         ## Display histogram 
         scalars = finalSeedIm.GetPointData().GetScalars()
@@ -208,7 +258,7 @@ class Segment(object):
         thresh_sub.SetSeedPoints(seeds)
         thresh_sub.SetNeighborhoodRadius(3, 3, 2) #The radius of the neighborhood that must be within the threshold values in order for the voxel to be included in the mask. The default radius is zero (one single voxel). The radius is measured in voxels
         thresh_sub.SetNeighborhoodFraction(0.10) #The fraction of the neighborhood that must be within the thresholds. The default value is 0.5.
-        thresh_sub.ThresholdBetween(0.1*uThre, uThre); 
+        thresh_sub.ThresholdBetween(0.25*uThre, uThre); 
         thresh_sub.SetInput( finalSeedIm )
         thresh_sub.Update()
         
